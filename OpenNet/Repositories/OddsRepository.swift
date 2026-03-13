@@ -123,7 +123,7 @@ final class OddsRepository {
                 matchID: m.matchID,
                 teamA: m.teamA,
                 teamB: m.teamB,
-                startTime: m.startTime,
+                startTime: Self.isoFormatter.date(from: m.startTime) ?? .distantPast,
                 teamAOdds: o.teamAOdds,
                 teamBOdds: o.teamBOdds
             )
@@ -131,10 +131,6 @@ final class OddsRepository {
     }
 
     private func sort(_ cells: [MatchCellModel]) -> [MatchCellModel] {
-        cells.sorted { a, b in
-            let t1 = Self.isoFormatter.date(from: a.startTime) ?? .distantPast
-            let t2 = Self.isoFormatter.date(from: b.startTime) ?? .distantPast
-            return t1 < t2
-        }
+        cells.sorted { $0.startTime < $1.startTime }
     }
 }

@@ -13,7 +13,7 @@ struct MatchCellModel: Identifiable, Sendable {
   let matchID: Int
   let teamA: String
   let teamB: String
-  let startTime: String
+  let startTime: Date
   let teamAOdds: Double
   let teamBOdds: Double
 

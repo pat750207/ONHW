@@ -19,12 +19,6 @@ final class OddsListTableViewCell: UITableViewCell {
 
     static let reuseId = "OddsListTableViewCell"
 
-    private static let isoParser: ISO8601DateFormatter = {
-        let fmt = ISO8601DateFormatter()
-        fmt.formatOptions = [.withInternetDateTime]
-        return fmt
-    }()
-
     private static let displayFormatter: DateFormatter = {
         let fmt = DateFormatter()
         fmt.dateStyle = .short
@@ -231,8 +225,7 @@ final class OddsListTableViewCell: UITableViewCell {
         }
     }
 
-    private static func formatTime(_ iso: String) -> String {
-        guard let date = isoParser.date(from: iso) else { return iso }
-        return displayFormatter.string(from: date)
+    private static func formatTime(_ date: Date) -> String {
+        displayFormatter.string(from: date)
     }
 }
