@@ -115,9 +115,9 @@ final class OddsListViewModel {
         print("[VM] 收到 \(updates.count) 筆賠率更新 \(updates.map(\.matchID))")
         // 送回 repository 做資料處理
         let (list, changes) = repository.applyUpdates(updates)
-        listSubject.send(list)
         if !changes.isEmpty {
             changesSubject.send(changes)
         }
+        listSubject.send(list)
     }
 }
