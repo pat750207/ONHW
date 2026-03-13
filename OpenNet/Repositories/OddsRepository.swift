@@ -18,7 +18,7 @@ final class OddsRepository {
 
     private var oddsStream: OddsStreamProtocol?
 
-    var cachedList: [MatchCellModel] = []
+    private(set) var cachedList: [MatchCellModel] = []
 
     // ViewModel 訂閱此 Publisher 取得原始 [Odds] 推播
     // Repository 只是轉接，不執行 .sink
