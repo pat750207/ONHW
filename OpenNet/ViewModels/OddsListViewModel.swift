@@ -10,18 +10,15 @@ import Foundation
 
 /// 比賽列表的 ViewModel —— 整個畫面的「單一資料源」。
 ///
-/// **Thread-Safety **：
-/// - 所有對 `listSubject` 的寫入都保證在 MainActor 上執行
-/// - REST 回傳後以 `MainActor.run` 切回主線程
-/// - WebSocket 更新經 Combine `collect` + `receive(on: .main)` 批次處理
-///
+/// **Thread-Safety**：
+/// - UI 更新（Subject.send）一律透過 `MainActor.run` 切回主線程
+/// - 資料層由 actor queue 化，UI 層由 MainActor queue化
 /// **效能**：
 /// - 高頻推送使用 `collect(.byTime(..., 100ms))` 批次合併，
 ///   每 100ms 最多觸發一次 UI 更新，維持 60fps 流暢度
 
-
 // 1. 呼叫 OddsRepository 取得初始快照，推送至 listPublisher
-// 2. 訂閱 Repository 暴露的 oddsPublisher，批次委派 Repository 套用更新，再推送結果
+// 2. 訂閱 Repository 暴露的 oddsPublisher，在 actor 背景執行
 // 3. 透過 Repository 管理 stream 生命週期（pause / reconnect）
 final class OddsListViewModel {
 
@@ -31,7 +28,6 @@ final class OddsListViewModel {
 
     // 單一資料源：所有 UI 資料從這裡流出，不對外暴露可變狀態。
     private let listSubject = CurrentValueSubject<[MatchCellModel], Never>([])
-
 
     private let changesSubject = PassthroughSubject<[Int: OddsHighlightSide], Never>()
 
@@ -53,21 +49,23 @@ final class OddsListViewModel {
         self.repository = repository
     }
 
-    //load cache first
+    // load cache first，REST 回傳後覆蓋
     func load() {
-        if !repository.cachedList.isEmpty {
-            listSubject.send(repository.cachedList)
-        }
-
         Task { [weak self] in
             guard let self else { return }
+
+            // load actor cache
+            let cached = await self.repository.cachedList
+            if !cached.isEmpty {
+                await MainActor.run { self.listSubject.send(cached) }
+            }
+
             do {
-                // Repository 負責 fetch + merge + sort + 寫 cache
-                let cells = try await repository.fetchSnapshot()
-                await MainActor.run {
-                    self.listSubject.send(cells)
-                    self.startOddsStream(for: cells.map(\.matchID))
-                }
+                // fetchSnapshot 在 actor 背景 do fetch + merge + sort + 寫 cache
+                let cells = try await self.repository.fetchSnapshot()
+                // 先啟動websocket，訂閱就緒後 UI 才顯示資料
+                await self.startOddsStream(for: cells.map(\.matchID))
+                await MainActor.run { self.listSubject.send(cells) }
             } catch {
                 await MainActor.run {
                     self.errorSubject.send(error as? APIError ?? .networkFailed)
@@ -78,46 +76,50 @@ final class OddsListViewModel {
 
     func pauseStream() {
         print("[VM] 暫停串流")
-        repository.pauseStream()
+        Task { [weak self] in await self?.repository.pauseStream() }
     }
 
     func reconnectStream() {
         print("[VM] 觸發重連")
-        repository.reconnectStream()
+        Task { [weak self] in await self?.repository.reconnectStream() }
     }
 
-    private func startOddsStream(for matchIDs: [Int]) {
-        // 請 Repository 建立並啟動串流
-        repository.startStream(for: matchIDs)
+    private func startOddsStream(for matchIDs: [Int]) async {
+        //  repository actor
+        await repository.startStream(for: matchIDs)
+        let oddsPublisher = await repository.oddsPublisher
+        let disconnectedPublisher = await repository.disconnectedPublisher
 
-        // 訂閱 Repository 暴露的 oddsPublisher（Repository 不 sink，只轉接）
-        // ViewModel 負責 100ms 批次合併（UI 優化）每秒最最多10筆
-        repository.oddsPublisher
-            .collect(.byTime(DispatchQueue.main, .milliseconds(100)))
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] batchedArrays in
-                let allUpdates = batchedArrays.flatMap { $0 }
-                self?.applyOddsUpdates(allUpdates)
-            }
-            .store(in: &cancellables)
+        // 切回 MainActor , cancellables 的讀寫在主線程
+        await MainActor.run { [weak self] in
+            guard let self else { return }
 
-        repository.disconnectedPublisher
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                print("[VM] 收到斷線事件，觸發 exponential backoff 重連")
-                self?.repository.reconnectStream()
-            }
-            .store(in: &cancellables)
-    }
+            oddsPublisher
+                .collect(.byTime(DispatchQueue.main, .milliseconds(100)))
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] batchedArrays in
+                    let allUpdates = batchedArrays.flatMap { $0 }
+                    guard let self, !allUpdates.isEmpty else { return }
+                    print("[VM] 收到 \(allUpdates.count) 筆賠率更新 \(allUpdates.map(\.matchID))")
+                    // applyUpdates 資料處理 在 actor background executor ）
+                    Task { [weak self] in
+                        guard let self else { return }
+                        let (list, changes) = await self.repository.applyUpdates(allUpdates)
+                        await MainActor.run {
+                            if !changes.isEmpty { self.changesSubject.send(changes) }
+                            self.listSubject.send(list)
+                        }
+                    }
+                }
+                .store(in: &self.cancellables)
 
-    private func applyOddsUpdates(_ updates: [Odds]) {
-        guard !updates.isEmpty else { return }
-        print("[VM] 收到 \(updates.count) 筆賠率更新 \(updates.map(\.matchID))")
-        // 送回 repository 做資料處理
-        let (list, changes) = repository.applyUpdates(updates)
-        if !changes.isEmpty {
-            changesSubject.send(changes)
+            disconnectedPublisher
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    print("[VM] 收到斷線事件，觸發 exponential backoff 重連")
+                    Task { [weak self] in await self?.repository.reconnectStream() }
+                }
+                .store(in: &self.cancellables)
         }
-        listSubject.send(list)
     }
 }

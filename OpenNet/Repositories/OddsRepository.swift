@@ -11,7 +11,7 @@ import Foundation
 // Repository Pattern
 // 所有資料的唯一窗口：REST、WebSocket、cache、applyUpdates
 // Repository 持有 WebSocket 但「不訂閱」只給 Publisher，由 ViewModel 決定何時 subscribe / batch
-final class OddsRepository {
+actor OddsRepository {
 
     private let apiService: MatchAPIServiceProtocol
     private let oddsStreamFactory: ([Int]) -> OddsStreamProtocol
@@ -39,13 +39,14 @@ final class OddsRepository {
 
     init(
         apiService: MatchAPIServiceProtocol,
-        oddsStreamFactory: @escaping ([Int]) -> OddsStreamProtocol = { OddsStreamService(matchIDs: $0) }
+        oddsStreamFactory: @escaping ([Int]) -> OddsStreamProtocol = {
+            OddsStreamService(matchIDs: $0)
+        }
     ) {
         self.apiService = apiService
         self.oddsStreamFactory = oddsStreamFactory
     }
 
-    // 建立並啟動串流。
     func startStream(for matchIDs: [Int]) {
         let stream = oddsStreamFactory(matchIDs)
         self.oddsStream = stream
