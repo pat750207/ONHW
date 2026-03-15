@@ -50,24 +50,9 @@ final class MatchCellModelTests: XCTestCase {
             matchID: matchID,
             teamA: "TeamA",
             teamB: "TeamB",
-            startTime: "2025-07-04T13:00:00Z",
+            startTime: Date(timeIntervalSince1970: 1751641200),
             teamAOdds: teamAOdds,
             teamBOdds: teamBOdds
         )
     }
-
-    // MARK: - Helpers
-
-    /// 建立一個已有 cachedList 的 OddsRepository，方便測試 applyUpdates。
-    /// cachedList 為 internal setter，@testable import 可直接寫入。
-    private func makeRepoWithCache(_ cache: [MatchCellModel]) -> OddsRepository {
-        let repo = OddsRepository(apiService: DummyAPIService())
-        repo.cachedList = cache
-        return repo
-    }
-}
-
-private final class DummyAPIService: MatchAPIServiceProtocol {
-    func fetchMatches() async throws -> [Match] { [] }
-    func fetchOdds() async throws -> [Odds] { [] }
 }

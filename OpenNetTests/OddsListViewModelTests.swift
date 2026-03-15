@@ -119,13 +119,13 @@ final class OddsListViewModelTests: XCTestCase {
         // 驗證數量
         XCTAssertEqual(receivedItems.count, 5, "應合併為 5 筆")
 
-        // 驗證排序：startTime 應為升序
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
+        // 驗證排序：startTime（Date）應為升序
         for i in 0..<(receivedItems.count - 1) {
-            let t1 = formatter.date(from: receivedItems[i].startTime)!
-            let t2 = formatter.date(from: receivedItems[i + 1].startTime)!
-            XCTAssertLessThanOrEqual(t1, t2, "index \(i) 的時間應 <= index \(i+1)")
+            XCTAssertLessThanOrEqual(
+                receivedItems[i].startTime,
+                receivedItems[i + 1].startTime,
+                "index \(i) 的時間應 <= index \(i+1)"
+            )
         }
     }
 
@@ -167,7 +167,7 @@ final class OddsListViewModelTests: XCTestCase {
         sut.load()
         wait(for: [loadExpectation], timeout: 2)
 
-        // 初始載入完成後，才模擬推播更新 matchID=1002 的賠率
+        // 初始載入完成後，流訂閱已建立（startOddsStream 在 listSubject.send 前完成）
         // ViewModel 的 collect(.byTime 100ms) 會在約 100ms 內批次處理並推送
         let updatedOdds = Odds(matchID: 1002, teamAOdds: 5.5, teamBOdds: 6.6)
         stubStream.updatesSubject.send([updatedOdds])
@@ -198,7 +198,7 @@ final class OddsListViewModelTests: XCTestCase {
                     XCTAssertGreaterThan(item.matchID, 0)
                     XCTAssertFalse(item.teamA.isEmpty)
                     XCTAssertFalse(item.teamB.isEmpty)
-                    XCTAssertFalse(item.startTime.isEmpty)
+                    XCTAssertNotEqual(item.startTime, .distantPast, "startTime 應被正確解析")
                     XCTAssertGreaterThan(item.teamAOdds, 0)
                     XCTAssertGreaterThan(item.teamBOdds, 0)
                 }
@@ -221,6 +221,8 @@ final class OddsListViewModelTests: XCTestCase {
         waitForExpectations(timeout: 2)
 
         sut.pauseStream()
+        // pauseStream 內部建立 Task（async），需讓 RunLoop 執行以允許 Task 完成
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
         XCTAssertTrue(stubStream.isPaused, "應透過 Repository 轉發 pause 給 stream")
     }
 
@@ -234,6 +236,8 @@ final class OddsListViewModelTests: XCTestCase {
         waitForExpectations(timeout: 2)
 
         sut.reconnectStream()
+        // reconnectStream 內部建立 Task（async），需讓 RunLoop 執行以允許 Task 完成
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
         XCTAssertEqual(stubStream.reconnectCount, 1, "應透過 Repository 轉發 reconnect 給 stream")
     }
 
