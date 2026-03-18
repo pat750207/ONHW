@@ -9,41 +9,6 @@ import Combine
 import XCTest
 @testable import OpenNet
 
-// APIService
-private final class StubAPIService: MatchAPIServiceProtocol {
-    var matchesToReturn: [Match] = []
-    var oddsToReturn: [Odds] = []
-    var shouldThrowError: APIError?
-
-    func fetchMatches() async throws -> [Match] {
-        if let error = shouldThrowError { throw error }
-        return matchesToReturn
-    }
-
-    func fetchOdds() async throws -> [Odds] {
-        if let error = shouldThrowError { throw error }
-        return oddsToReturn
-    }
-}
-
-// manual Service
-private final class StubStreamService: OddsStreamProtocol {
-    let updatesSubject = PassthroughSubject<[Odds], Never>()
-    let disconnectedSubject = PassthroughSubject<Void, Never>()
-
-    var updates: AnyPublisher<[Odds], Never> { updatesSubject.eraseToAnyPublisher() }
-    var disconnected: AnyPublisher<Void, Never> { disconnectedSubject.eraseToAnyPublisher() }
-
-    private(set) var isStarted = false
-    private(set) var isPaused = false
-    private(set) var reconnectCount = 0
-
-    func start() { isStarted = true }
-    func stop() { isStarted = false }
-    func pause() { isPaused = true; stop() }
-    func reconnect() { reconnectCount += 1; start() }
-}
-
 final class OddsListViewModelTests: XCTestCase {
 
     private var stubAPI: StubAPIService!
@@ -58,7 +23,6 @@ final class OddsListViewModelTests: XCTestCase {
         stubStream = StubStreamService()
         cancellables = []
 
-        // oddsStreamFactory 注入 Repository，ViewModel 只認識 Repository
         repository = OddsRepository(
             apiService: stubAPI,
             oddsStreamFactory: { [weak self] _ in self?.stubStream ?? StubStreamService() }
@@ -75,51 +39,28 @@ final class OddsListViewModelTests: XCTestCase {
         super.tearDown()
     }
 
-    private func makeMatches(count: Int = 3) -> [Match] {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
-        let base = Date(timeIntervalSince1970: 1751641200)
-        return (0..<count).map { i in
-            Match(
-                matchID: 1001 + i,
-                teamA: "Team\(i)A",
-                teamB: "Team\(i)B",
-                startTime: formatter.string(from: base.addingTimeInterval(Double(i) * 1800))
-            )
-        }
-    }
+    // MARK: - load
 
-    private func makeOdds(count: Int = 3) -> [Odds] {
-        (0..<count).map { i in
-            Odds(matchID: 1001 + i, teamAOdds: 1.9, teamBOdds: 2.0)
-        }
-    }
+    func testLoad_MergesAndSortsByStartTimeAscending() async throws {
+        stubAPI.matchesToReturn = TestFixtures.makeMatches(count: 5)
+        stubAPI.oddsToReturn = TestFixtures.makeOdds(count: 5)
 
-    func testLoad_MergesAndSortsByStartTimeAscending() {
-        let expectation = expectation(description: "list published")
-
-        stubAPI.matchesToReturn = makeMatches(count: 5)
-        stubAPI.oddsToReturn = makeOdds(count: 5)
-
+        let exp = expectation(description: "list published")
         var receivedItems: [MatchCellModel] = []
 
         sut.listPublisher
-            .dropFirst()  // 跳過初始空陣列
+            .dropFirst()
             .first()
             .sink { items in
                 receivedItems = items
-                expectation.fulfill()
+                exp.fulfill()
             }
             .store(in: &cancellables)
 
         sut.load()
+        await fulfillment(of: [exp], timeout: 2)
 
-        waitForExpectations(timeout: 2)
-
-        // 驗證數量
         XCTAssertEqual(receivedItems.count, 5, "應合併為 5 筆")
-
-        // 驗證排序：startTime（Date）應為升序
         for i in 0..<(receivedItems.count - 1) {
             XCTAssertLessThanOrEqual(
                 receivedItems[i].startTime,
@@ -129,67 +70,114 @@ final class OddsListViewModelTests: XCTestCase {
         }
     }
 
-    func testLoad_WhenAPIFails_PublishesError() {
-        let expectation = expectation(description: "error published")
-
+    func testLoad_WhenAPIFails_PublishesError() async throws {
         stubAPI.shouldThrowError = .networkFailed
 
+        let exp = expectation(description: "error published")
         sut.errorPublisher
             .first()
             .sink { error in
                 XCTAssertEqual(error, .networkFailed)
-                expectation.fulfill()
+                exp.fulfill()
             }
             .store(in: &cancellables)
 
         sut.load()
-        waitForExpectations(timeout: 2)
+        await fulfillment(of: [exp], timeout: 2)
     }
 
-    func testStreamUpdate_OnlyChangesOddsForMatchingID() {
-        let loadExpectation = expectation(description: "initial load")
-        let updateExpectation = expectation(description: "odds updated")
+    func testLoad_CalledTwice_DoesNotDuplicateStream() async throws {
+        stubAPI.matchesToReturn = TestFixtures.makeMatches(count: 1)
+        stubAPI.oddsToReturn = TestFixtures.makeOdds(count: 1)
 
-        stubAPI.matchesToReturn = makeMatches(count: 3)
-        stubAPI.oddsToReturn = makeOdds(count: 3)
+        let exp = expectation(description: "loaded")
+        exp.expectedFulfillmentCount = 1
 
+        sut.listPublisher
+            .dropFirst()
+            .first()
+            .sink { _ in exp.fulfill() }
+            .store(in: &cancellables)
+
+        // 快速呼叫兩次，第一次應被取消
+        sut.load()
+        sut.load()
+
+        await fulfillment(of: [exp], timeout: 2)
+        // 最終只有一次有效 stream 訂閱
+        XCTAssertTrue(stubStream.isStarted)
+    }
+
+    // MARK: - stream updates
+
+    func testStreamUpdate_OnlyChangesOddsForMatchingID() async throws {
+        stubAPI.matchesToReturn = TestFixtures.makeMatches(count: 3)
+        stubAPI.oddsToReturn = TestFixtures.makeOdds(count: 3)
+
+        let loadExp = expectation(description: "initial load")
+        let updateExp = expectation(description: "odds updated")
         var emissions: [[MatchCellModel]] = []
 
         sut.listPublisher
-            .dropFirst()  // 跳過初始空陣列
+            .dropFirst()
             .sink { items in
                 emissions.append(items)
-                if emissions.count == 1 { loadExpectation.fulfill() }
-                if emissions.count == 2 { updateExpectation.fulfill() }
+                if emissions.count == 1 { loadExp.fulfill() }
+                if emissions.count == 2 { updateExp.fulfill() }
             }
             .store(in: &cancellables)
 
         sut.load()
-        wait(for: [loadExpectation], timeout: 2)
+        await fulfillment(of: [loadExp], timeout: 2)
 
-        // 初始載入完成後，流訂閱已建立（startOddsStream 在 listSubject.send 前完成）
-        // ViewModel 的 collect(.byTime 100ms) 會在約 100ms 內批次處理並推送
         let updatedOdds = Odds(matchID: 1002, teamAOdds: 5.5, teamBOdds: 6.6)
         stubStream.updatesSubject.send([updatedOdds])
 
-        wait(for: [updateExpectation], timeout: 2)
+        await fulfillment(of: [updateExp], timeout: 2)
 
         let latestItems = emissions.last!
         let updated = latestItems.first(where: { $0.matchID == 1002 })!
         XCTAssertEqual(updated.teamAOdds, 5.5, "matchID 1002 的 teamAOdds 應被更新")
         XCTAssertEqual(updated.teamBOdds, 6.6, "matchID 1002 的 teamBOdds 應被更新")
 
-        // 其他比賽賠率不應改變
         let unchanged = latestItems.first(where: { $0.matchID == 1001 })!
         XCTAssertEqual(unchanged.teamAOdds, 1.9, "matchID 1001 的賠率不應被改變")
     }
 
-    func testMergedItems_AllFieldsPopulated() {
-        let expectation = expectation(description: "list published")
+    func testChangesPublisher_WhenOddsUpdate_PublishesHighlightSide() async throws {
+        stubAPI.matchesToReturn = TestFixtures.makeMatches(count: 2)
+        stubAPI.oddsToReturn = TestFixtures.makeOdds(count: 2, teamAOdds: 1.9, teamBOdds: 2.0)
 
-        stubAPI.matchesToReturn = makeMatches(count: 3)
-        stubAPI.oddsToReturn = makeOdds(count: 3)
+        let loadExp = expectation(description: "initial load")
+        let changesExp = expectation(description: "changes published")
+        var receivedChanges: [Int: OddsHighlightSide] = [:]
 
+        sut.listPublisher.dropFirst().first().sink { _ in loadExp.fulfill() }.store(in: &cancellables)
+        sut.changesPublisher
+            .first()
+            .sink { changes in
+                receivedChanges = changes
+                changesExp.fulfill()
+            }
+            .store(in: &cancellables)
+
+        sut.load()
+        await fulfillment(of: [loadExp], timeout: 2)
+
+        // teamA 改變 → should be .teamA
+        stubStream.updatesSubject.send([Odds(matchID: 1001, teamAOdds: 3.0, teamBOdds: 2.0)])
+
+        await fulfillment(of: [changesExp], timeout: 2)
+        XCTAssertEqual(receivedChanges[1001], .teamA)
+    }
+
+    // MARK: - all fields populated
+
+    func testMergedItems_AllFieldsPopulated() async throws {
+        stubAPI.matchesToReturn = TestFixtures.makeMatches(count: 3)
+        stubAPI.oddsToReturn = TestFixtures.makeOdds(count: 3)
+
+        let exp = expectation(description: "list published")
         sut.listPublisher
             .dropFirst()
             .first()
@@ -202,43 +190,39 @@ final class OddsListViewModelTests: XCTestCase {
                     XCTAssertGreaterThan(item.teamAOdds, 0)
                     XCTAssertGreaterThan(item.teamBOdds, 0)
                 }
-                expectation.fulfill()
+                exp.fulfill()
             }
             .store(in: &cancellables)
 
         sut.load()
-        waitForExpectations(timeout: 2)
+        await fulfillment(of: [exp], timeout: 2)
     }
 
-    func testPauseStream_DelegatesToRepository() {
-        // 先 load 啟動 stream
-        stubAPI.matchesToReturn = makeMatches(count: 1)
-        stubAPI.oddsToReturn = makeOdds(count: 1)
+    // MARK: - lifecycle delegation
+
+    func testPauseStream_DelegatesToRepository() async throws {
+        stubAPI.matchesToReturn = TestFixtures.makeMatches(count: 1)
+        stubAPI.oddsToReturn = TestFixtures.makeOdds(count: 1)
 
         let exp = expectation(description: "loaded")
         sut.listPublisher.dropFirst().first().sink { _ in exp.fulfill() }.store(in: &cancellables)
         sut.load()
-        waitForExpectations(timeout: 2)
+        await fulfillment(of: [exp], timeout: 2)
 
-        sut.pauseStream()
-        // pauseStream 內部建立 Task（async），需讓 RunLoop 執行以允許 Task 完成
-        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+        await sut.pauseStream()
         XCTAssertTrue(stubStream.isPaused, "應透過 Repository 轉發 pause 給 stream")
     }
 
-    func testReconnectStream_DelegatesToRepository() {
-        stubAPI.matchesToReturn = makeMatches(count: 1)
-        stubAPI.oddsToReturn = makeOdds(count: 1)
+    func testReconnectStream_DelegatesToRepository() async throws {
+        stubAPI.matchesToReturn = TestFixtures.makeMatches(count: 1)
+        stubAPI.oddsToReturn = TestFixtures.makeOdds(count: 1)
 
         let exp = expectation(description: "loaded")
         sut.listPublisher.dropFirst().first().sink { _ in exp.fulfill() }.store(in: &cancellables)
         sut.load()
-        waitForExpectations(timeout: 2)
+        await fulfillment(of: [exp], timeout: 2)
 
-        sut.reconnectStream()
-        // reconnectStream 內部建立 Task（async），需讓 RunLoop 執行以允許 Task 完成
-        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+        await sut.reconnectStream()
         XCTAssertEqual(stubStream.reconnectCount, 1, "應透過 Repository 轉發 reconnect 給 stream")
     }
-
 }

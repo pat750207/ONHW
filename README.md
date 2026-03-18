@@ -137,20 +137,21 @@ OpenNet/
     └── OddsStreamService.swift       ← 模擬 WebSocket + Exponential Backoff 重連
 
 OpenNetTests/
-├── OddsListViewModelTests.swift     ← 注入 StubAPIService + StubStreamService 測試行為
-├── MatchCellModelTests.swift        ← oddsChanged diff helper、Identifiable
-└── MockAPIServiceTests.swift        ← Mock 資料格式驗證（100 筆、欄位完整）
+├── TestStubs.swift                  ← 共用 StubAPIService / StubStreamService / TestFixtures
+├── OddsListViewModelTests.swift     ← 注入 stub 驗證 load / 串流更新 / changesPublisher / lifecycle
+├── OddsRepositoryTests.swift        ← 直接測試 fetchSnapshot、applyUpdates highlight 判斷
+└── MatchCellModelTests.swift        ← oddsChanged diff helper、Identifiable
 ```
 
 ---
 
 ## 測試
 
-單元測試透過注入 stub service 驗證 **ViewModel 實際行為**：
+單元測試透過注入 stub service 驗證行為，所有測試方法均為 `async throws`，使用 `await fulfillment(of:timeout:)` 取代 timing hack。
 
-- **OddsListViewModelTests**：透過 Repository 注入 `StubAPIService` + `StubStreamService`，驗證初始載入合併排序正確、推播僅更新對應 matchID 的賠率、API 錯誤正確傳遞至 errorPublisher、pause/reconnect 透過 Repository 轉發至串流
-- **MatchCellModelTests**：透過 `OddsRepository.applyUpdates` 驗證各種賠率變動方向（teamA / teamB / both / 無變動）回傳正確的 `OddsHighlightSide`，以及 `Identifiable` identity（matchID）
-- **MockAPIServiceTests**：驗證 mock 資料符合 PDF 規格（100 筆、matchID 對齊、欄位完整）
+- **OddsRepositoryTests**：直接對 `actor OddsRepository` 測試 `fetchSnapshot`（merge、sort、cache 寫入、API 失敗 throws、無賠率比賽略過）與 `applyUpdates`（teamA / teamB / both 變動、無變動、未知 matchID、空陣列）
+- **OddsListViewModelTests**：注入 `StubAPIService` + `StubStreamService`，驗證初始載入合併排序、串流推播僅更新對應 matchID、`changesPublisher` 推送正確 highlight side、`load()` 重複呼叫不重複啟動串流、pause/reconnect 正確委派至 Repository
+- **MatchCellModelTests**：`oddsChanged()` 各 branch（僅 A 變 / 僅 B 變 / 兩側都變 / 相同 / 不同 matchID）、`Identifiable` identity
 
 ---
 
