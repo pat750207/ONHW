@@ -25,6 +25,7 @@ final class OddsListViewModel {
     private let repository: OddsRepository
 
     private var cancellables = Set<AnyCancellable>()
+    private var loadTask: Task<Void, Never>?
 
     // 單一資料源：所有 UI 資料從這裡流出，不對外暴露可變狀態。
     private let listSubject = CurrentValueSubject<[MatchCellModel], Never>([])
@@ -51,7 +52,8 @@ final class OddsListViewModel {
 
     // load cache first，REST 回傳後覆蓋
     func load() {
-        Task { [weak self] in
+        loadTask?.cancel()
+        loadTask = Task { [weak self] in
             guard let self else { return }
 
             // load actor cache
@@ -60,9 +62,12 @@ final class OddsListViewModel {
                 await MainActor.run { self.listSubject.send(cached) }
             }
 
+            guard !Task.isCancelled else { return }
+
             do {
                 // fetchSnapshot 在 actor 背景 do fetch + merge + sort + 寫 cache
                 let cells = try await self.repository.fetchSnapshot()
+                guard !Task.isCancelled else { return }
                 // 先啟動websocket，訂閱就緒後 UI 才顯示資料
                 await self.startOddsStream(for: cells.map(\.matchID))
                 await MainActor.run { self.listSubject.send(cells) }
@@ -74,14 +79,14 @@ final class OddsListViewModel {
         }
     }
 
-    func pauseStream() {
+    func pauseStream() async {
         print("[VM] 暫停串流")
-        Task { [weak self] in await self?.repository.pauseStream() }
+        await repository.pauseStream()
     }
 
-    func reconnectStream() {
+    func reconnectStream() async {
         print("[VM] 觸發重連")
-        Task { [weak self] in await self?.repository.reconnectStream() }
+        await repository.reconnectStream()
     }
 
     private func startOddsStream(for matchIDs: [Int]) async {

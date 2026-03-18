@@ -164,13 +164,13 @@ final class OddsListViewController: UIViewController {
     private func observeAppLifecycle() {
         NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)
             .sink { [weak self] _ in
-                self?.viewModel.pauseStream()
+                Task { await self?.viewModel.pauseStream() }
             }
             .store(in: &cancellables)
 
         NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)
             .sink { [weak self] _ in
-                self?.viewModel.reconnectStream()
+                Task { await self?.viewModel.reconnectStream() }
             }
             .store(in: &cancellables)
     }

@@ -42,6 +42,7 @@ final class OddsStreamService: OddsStreamProtocol {
     private let initialReconnectDelay: TimeInterval = 1.0
     private var reconnectAttempts = 0
     private let maxReconnectAttempts = 10
+    private var reconnectTask: Task<Void, Never>?
 
     // 記錄每個 matchID 上一次的賠率，讓 randomOdds() 能選擇只改單側。
     private var lastKnownOdds: [Int: (a: Double, b: Double)] = [:]
@@ -79,6 +80,8 @@ final class OddsStreamService: OddsStreamProtocol {
     }
 
     func stop() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
         disconnectWorkItem?.cancel()
         disconnectWorkItem = nil
         timerCancellable?.cancel()
@@ -102,10 +105,12 @@ final class OddsStreamService: OddsStreamProtocol {
         let delay = reconnectDelay
         print("[OddsStream] 第 \(reconnectAttempts) 次重連，延遲 \(delay)s")
 
-        /// add delay
         reconnectDelay = min(reconnectDelay * 2, maxReconnectDelay)
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+        reconnectTask?.cancel()
+        reconnectTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled else { return }
             self?.start()
         }
     }
