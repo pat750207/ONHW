@@ -131,7 +131,7 @@ final class OddsListViewModelTests: XCTestCase {
         await fulfillment(of: [loadExp], timeout: 2)
 
         let updatedOdds = Odds(matchID: 1002, teamAOdds: 5.5, teamBOdds: 6.6)
-        stubStream.updatesSubject.send([updatedOdds])
+        stubStream.sendOddsUpdate([updatedOdds])
 
         await fulfillment(of: [updateExp], timeout: 2)
 
@@ -165,7 +165,7 @@ final class OddsListViewModelTests: XCTestCase {
         await fulfillment(of: [loadExp], timeout: 2)
 
         // teamA 改變 → should be .teamA
-        stubStream.updatesSubject.send([Odds(matchID: 1001, teamAOdds: 3.0, teamBOdds: 2.0)])
+        stubStream.sendOddsUpdate([Odds(matchID: 1001, teamAOdds: 3.0, teamBOdds: 2.0)])
 
         await fulfillment(of: [changesExp], timeout: 2)
         XCTAssertEqual(receivedChanges[1001], .teamA)
