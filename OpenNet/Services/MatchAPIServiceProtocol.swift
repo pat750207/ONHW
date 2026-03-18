@@ -8,14 +8,14 @@
 import Foundation
 
 // REST API error。
-enum APIError: Error, Equatable {
+enum APIError: Error, Equatable, Sendable {
     case networkFailed
     case decodingFailed
     case serverError(Int)
 }
 
-// for test and viewmodel inject
-protocol MatchAPIServiceProtocol: AnyObject {
+// AnyObject 移除：MockAPIService 為 struct，不強制 reference type。
+protocol MatchAPIServiceProtocol {
     func fetchMatches() async throws -> [Match]
     func fetchOdds() async throws -> [Odds]
 }

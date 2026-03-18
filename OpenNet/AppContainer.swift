@@ -7,7 +7,7 @@
 
 final class AppContainer {
 
-    private let apiService: MatchAPIServiceProtocol = MockAPIService()
+    private let apiService: any MatchAPIServiceProtocol = MockAPIService()
 
     let repository: OddsRepository
 

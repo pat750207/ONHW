@@ -8,7 +8,8 @@
 import Foundation
 
 // 模擬 GET /matches 與 GET /odds 的記憶體資料來源（約 100 筆）。
-final class MockAPIService: MatchAPIServiceProtocol {
+// 無可變狀態，使用 struct（value type）即可。
+struct MockAPIService: MatchAPIServiceProtocol {
 
     // static for reuse
     private static let isoFormatter: ISO8601DateFormatter = {

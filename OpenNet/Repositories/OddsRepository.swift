@@ -5,31 +5,39 @@
 //  Created by Pat Chang on 2026/3/12.
 //
 
-import Combine
 import Foundation
 
 // Repository Pattern
 // 所有資料的唯一窗口：REST、WebSocket、cache、applyUpdates
-// Repository 持有 WebSocket 但「不訂閱」只給 Publisher，由 ViewModel 決定何時 subscribe / batch
+//
+// 分層原則：
+// - Service 層回傳 AsyncStream（Sendable value type，thread-safe）
+// - Repository 管理 stream 生命週期，對外暴露 activeStream
+// - ViewModel（@MainActor）透過 activeStream 取得 AsyncStream，
+//   在 MainActor context 上 await stream.updates / stream.disconnected
+//
+// ## 為何不在 Repository 存 AsyncStream 屬性
+// AsyncStream 在此 SDK 版本帶有 @MainActor 推斷；
+// 若存入 actor OddsRepository 的 stored property，
+// OddsRepository（非 MainActor）的方法讀寫時會違反 isolation。
+// 改由 @MainActor ViewModel 自行 await 存取，類型和 isolation 均合法。
 actor OddsRepository {
 
-    private let apiService: MatchAPIServiceProtocol
-    private let oddsStreamFactory: ([Int]) -> OddsStreamProtocol
+    // any MatchAPIServiceProtocol：移除 AnyObject 後改用 Swift 5.7 existential 語法。
+    private let apiService: any MatchAPIServiceProtocol
 
-    private var oddsStream: OddsStreamProtocol?
+    // async factory：OddsStreamService.init 被 SDK 推斷為 @MainActor，
+    // 需用 `await MainActor.run { }` 建立，factory 本身必須宣告 async。
+    private let oddsStreamFactory: ([Int]) async -> any OddsStreamProtocol
+
+    // 持有 stream service 實例，用於生命週期管理（start / pause / reconnect）
+    private var oddsStream: (any OddsStreamProtocol)?
 
     private(set) var cachedList: [MatchCellModel] = []
 
-    // ViewModel 訂閱此 Publisher 取得原始 [Odds] 推播
-    // Repository 只是轉接，不執行 .sink
-    var oddsPublisher: AnyPublisher<[Odds], Never> {
-        oddsStream?.updates ?? Empty().eraseToAnyPublisher()
-    }
-
-    // 斷線事件 Publisher，ViewModel 收到後決定是否呼叫 reconnectStream()
-    var disconnectedPublisher: AnyPublisher<Void, Never> {
-        oddsStream?.disconnected ?? Empty().eraseToAnyPublisher()
-    }
+    // @MainActor ViewModel 透過此屬性取得 stream service，
+    // 再於 MainActor context 自行 await stream.updates / stream.disconnected。
+    var activeStream: (any OddsStreamProtocol)? { oddsStream }
 
     private static let isoFormatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -38,29 +46,29 @@ actor OddsRepository {
     }()
 
     init(
-        apiService: MatchAPIServiceProtocol,
-        oddsStreamFactory: @escaping ([Int]) -> OddsStreamProtocol = {
-            OddsStreamService(matchIDs: $0)
+        apiService: any MatchAPIServiceProtocol,
+        oddsStreamFactory: @escaping ([Int]) async -> any OddsStreamProtocol = { matchIDs in
+            await MainActor.run { OddsStreamService(matchIDs: matchIDs) }
         }
     ) {
         self.apiService = apiService
         self.oddsStreamFactory = oddsStreamFactory
     }
 
-    func startStream(for matchIDs: [Int]) {
-        let stream = oddsStreamFactory(matchIDs)
+    func startStream(for matchIDs: [Int]) async {
+        let stream = await oddsStreamFactory(matchIDs)
         self.oddsStream = stream
-        stream.start()
+        await stream.start()
     }
 
-    func pauseStream() {
+    func pauseStream() async {
         print("[Repository] 暫停串流")
-        oddsStream?.pause()
+        await oddsStream?.pause()
     }
 
-    func reconnectStream() {
+    func reconnectStream() async {
         print("[Repository] 觸發重連")
-        oddsStream?.reconnect()
+        await oddsStream?.reconnect()
     }
 
     // get matches + odds，合併、排序，更新快取後回傳結果。
