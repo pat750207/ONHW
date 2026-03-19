@@ -11,33 +11,35 @@ import Foundation
 // 所有資料的唯一窗口：REST、WebSocket、cache、applyUpdates
 //
 // 分層原則：
-// - Service 層回傳 AsyncStream（Sendable value type，thread-safe）
-// - Repository 管理 stream 生命週期，對外暴露 activeStream
-// - ViewModel（@MainActor）透過 activeStream 取得 AsyncStream，
-//   在 MainActor context 上 await stream.updates / stream.disconnected
-//
-// ## 為何不在 Repository 存 AsyncStream 屬性
-// AsyncStream 在此 SDK 版本帶有 @MainActor 推斷；
-// 若存入 actor OddsRepository 的 stored property，
-// OddsRepository（非 MainActor）的方法讀寫時會違反 isolation。
-// 改由 @MainActor ViewModel 自行 await 存取，類型和 isolation 均合法。
+// - Service 層（OddsStreamService）只負責產出 [Odds] 與斷線事件
+// - Repository 建立並持有 stream、在內部消費 updates/disconnected，
+//   轉成「已合併的 (list, changes)」與斷線事件，對外只暴露這兩條 AsyncStream
+// - ViewModel 只訂閱 Repository 的 updatesStream / disconnectedStream，不認識 OddsStreamProtocol
 actor OddsRepository {
 
-    // any MatchAPIServiceProtocol：移除 AnyObject 後改用 Swift 5.7 existential 語法。
     private let apiService: any MatchAPIServiceProtocol
-
-    // async factory：OddsStreamService.init 被 SDK 推斷為 @MainActor，
-    // 需用 `await MainActor.run { }` 建立，factory 本身必須宣告 async。
     private let oddsStreamFactory: ([Int]) async -> any OddsStreamProtocol
 
-    // 持有 stream service 實例，用於生命週期管理（start / pause / reconnect）
     private var oddsStream: (any OddsStreamProtocol)?
+
+    // 記錄最後一次啟動用的 matchIDs，reconnect 時需要重新 startStream
+    private var lastMatchIDs: [Int] = []
+
+    /// 對外暴露：已合併的 (list, changes)，由 Repository 內部消費 OddsStreamService 後 yield
+    private var _updatesStream: AsyncStream<UpdateResult>?
+    private var _updatesContinuation: AsyncStream<UpdateResult>.Continuation?
+    /// 對外暴露：斷線事件，由 Repository 內部轉發
+    private var _disconnectedStream: AsyncStream<Void>?
+    private var _disconnectedContinuation: AsyncStream<Void>.Continuation?
+
+    // 消費 OddsStreamService 的 Task handles，需要在 finishStreams 時取消
+    private var updatesConsumerTask: Task<Void, Never>?
+    private var disconnectedConsumerTask: Task<Void, Never>?
 
     private(set) var cachedList: [MatchCellModel] = []
 
-    // @MainActor ViewModel 透過此屬性取得 stream service，
-    // 再於 MainActor context 自行 await stream.updates / stream.disconnected。
-    var activeStream: (any OddsStreamProtocol)? { oddsStream }
+    // for highlight，對外 stream 與 applyUpdates 共用
+    typealias UpdateResult = (list: [MatchCellModel], changes: [Int: OddsHighlightSide])
 
     private static let isoFormatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -55,20 +57,90 @@ actor OddsRepository {
         self.oddsStreamFactory = oddsStreamFactory
     }
 
+    /// ViewModel 取得「已合併更新」流，不需認識 OddsStreamProtocol
+    func getUpdatesStream() -> AsyncStream<UpdateResult>? { _updatesStream }
+
+    /// ViewModel 取得斷線事件流
+    func getDisconnectedStream() -> AsyncStream<Void>? { _disconnectedStream }
+
     func startStream(for matchIDs: [Int]) async {
+        finishStreams()
+
+        lastMatchIDs = matchIDs
+
         let stream = await oddsStreamFactory(matchIDs)
         self.oddsStream = stream
         await stream.start()
+
+        var updatesCont: AsyncStream<UpdateResult>.Continuation!
+        var disconnectedCont: AsyncStream<Void>.Continuation!
+        _updatesStream = AsyncStream<UpdateResult> { updatesCont = $0 }
+        _disconnectedStream = AsyncStream<Void> { disconnectedCont = $0 }
+        _updatesContinuation = updatesCont
+        _disconnectedContinuation = disconnectedCont
+
+        let updates = await stream.updates
+        let disconnected = await stream.disconnected
+
+        // Task handle 存起來，finishStreams 時取消，避免 zombie Task
+        updatesConsumerTask = Task {
+            for await odds in updates {
+                let result = await self.applyUpdates(odds)
+                await self.yieldUpdate(result)
+            }
+        }
+        disconnectedConsumerTask = Task {
+            for await _ in disconnected {
+                await self.yieldDisconnected()
+            }
+        }
+    }
+
+    private func yieldUpdate(_ result: UpdateResult) {
+        _updatesContinuation?.yield(result)
+    }
+
+    private func yieldDisconnected() {
+        _disconnectedContinuation?.yield(())
+    }
+
+    private func finishStreams() {
+        // consumer Tasks 先取消，避免殘留 Task 繼續處理資料
+        updatesConsumerTask?.cancel()
+        updatesConsumerTask = nil
+        disconnectedConsumerTask?.cancel()
+        disconnectedConsumerTask = nil
+        _updatesContinuation?.finish()
+        _updatesContinuation = nil
+        _updatesStream = nil
+        _disconnectedContinuation?.finish()
+        _disconnectedContinuation = nil
+        _disconnectedStream = nil
     }
 
     func pauseStream() async {
         print("[Repository] 暫停串流")
         await oddsStream?.pause()
+        finishStreams()
     }
 
-    func reconnectStream() async {
+    /// 回傳 true 代表 pipeline 已重建（新的 streams），ViewModel 需要重新訂閱
+    /// 回傳 false 代表既有 streams 仍然存活，ViewModel 的 Task 繼續接收即可
+    @discardableResult
+    func reconnectStream() async -> Bool {
         print("[Repository] 觸發重連")
-        await oddsStream?.reconnect()
+        if _updatesContinuation == nil, !lastMatchIDs.isEmpty {
+            // streams 已被 pause/finish（例如 App 進入背景後回前景）
+            // → 重建整條 pipeline，立即恢復資料流
+            print("[Repository] streams 已結束，重建 pipeline（matchIDs: \(lastMatchIDs.count)）")
+            await startStream(for: lastMatchIDs)
+            return true
+        } else {
+            // streams 仍然存活（例如 WebSocket 自動斷線）
+            // → 保留既有 pipeline，只重啟底層 service（含 exponential backoff）
+            await oddsStream?.reconnect()
+            return false
+        }
     }
 
     // get matches + odds，合併、排序，更新快取後回傳結果。
@@ -80,9 +152,6 @@ actor OddsRepository {
         cachedList = cells
         return cells
     }
-
-    // for highlight
-    typealias UpdateResult = (list: [MatchCellModel], changes: [Int: OddsHighlightSide])
 
     // returns list and highlight
     func applyUpdates(_ updates: [Odds]) -> UpdateResult {

@@ -88,30 +88,25 @@ final class OddsListViewModel {
 
     func reconnectStream() async {
         print("[VM] 觸發重連")
-        await repository.reconnectStream()
+        let pipelineRebuilt = await repository.reconnectStream()
+        if pipelineRebuilt {
+            // Repository 重建了整條 pipeline（背景回前景）
+            // 舊的 oddsTask / disconnectTask 的 for await 已自然退出，需重新訂閱新 streams
+            print("[VM] pipeline 已重建，重新訂閱 streams")
+            await resubscribeStreams()
+        }
+        // else：streams 仍然存活（WebSocket 自動斷線），既有 Task 繼續接收，不需重訂閱
     }
 
-    private func startOddsStream(for matchIDs: [Int]) async {
-        await repository.startStream(for: matchIDs)
+    private func resubscribeStreams() async {
+        guard let updatesStream = await repository.getUpdatesStream(),
+              let disconnectedStream = await repository.getDisconnectedStream() else { return }
 
-        // 在 @MainActor context 取得 stream service，
-        // 再 await stream.updates / stream.disconnected：
-        // AsyncStream 帶有 @MainActor 推斷，從 @MainActor context 存取合法，
-        // 無需 nonisolated(unsafe) 或額外繞行。
-        guard let stream = await repository.activeStream else { return }
-        let oddsStream = await stream.updates
-        let disconnectedStream = await stream.disconnected
-
-        // AsyncStream → CurrentValueSubject / PassthroughSubject
-        // Task 繼承 @MainActor context，await repository 後自動回到主線程，
-        // send() 在主線程執行，無需額外 receive(on:) 或 MainActor.run。
         oddsTask?.cancel()
         oddsTask = Task { [weak self] in
             guard let self else { return }
-            for await odds in oddsStream {
+            for await (list, changes) in updatesStream {
                 guard !Task.isCancelled else { break }
-                print("[VM] 收到 \(odds.count) 筆賠率更新 \(odds.map(\.matchID))")
-                let (list, changes) = await self.repository.applyUpdates(odds)
                 if !changes.isEmpty { self.changesSubject.send(changes) }
                 self.listSubject.send(list)
             }
@@ -122,8 +117,35 @@ final class OddsListViewModel {
             guard let self else { return }
             for await _ in disconnectedStream {
                 guard !Task.isCancelled else { break }
-                print("[VM] 收到斷線事件，觸發 exponential backoff 重連")
-                await self.repository.reconnectStream()
+                print("[VM] 收到斷線事件，觸發重連")
+                await self.reconnectStream()
+            }
+        }
+    }
+
+    private func startOddsStream(for matchIDs: [Int]) async {
+        await repository.startStream(for: matchIDs)
+
+        guard let updatesStream = await repository.getUpdatesStream(),
+              let disconnectedStream = await repository.getDisconnectedStream() else { return }
+
+        oddsTask?.cancel()
+        oddsTask = Task { [weak self] in
+            guard let self else { return }
+            for await (list, changes) in updatesStream {
+                guard !Task.isCancelled else { break }
+                if !changes.isEmpty { self.changesSubject.send(changes) }
+                self.listSubject.send(list)
+            }
+        }
+
+        disconnectTask?.cancel()
+        disconnectTask = Task { [weak self] in
+            guard let self else { return }
+            for await _ in disconnectedStream {
+                guard !Task.isCancelled else { break }
+                print("[VM] 收到斷線事件，觸發重連")
+                await self.reconnectStream()
             }
         }
     }

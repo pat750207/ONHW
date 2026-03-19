@@ -43,10 +43,11 @@ UIKit 即時資料展示 App。採用 **MVVM** 架構，整合 REST API Mock、W
 | 層 | 工具 | 理由 |
 |----|------|------|
 | Service（`OddsStreamService` actor） | `AsyncStream` + actor-isolated `Continuation` | thread-safe value type；actor serial executor 序列化 `yield()`，無需手動加鎖 |
-| ViewModel（`@MainActor`） | `Task + for await` | 在 MainActor context 消費串流，await 後自動回到主線程，直接 `send()` 給 Subject，無需 `receive(on:)` 或 `Task { @MainActor in }` |
+| Repository（`OddsRepository` actor） | `Task + for await`（consumer Tasks） | 在 actor executor 消費 Service 的 AsyncStream，完成 `applyUpdates` 後以自己的 continuation yield 已處理結果；只對外暴露乾淨的 `(list, changes)` 流 |
+| ViewModel（`@MainActor`） | `Task + for await` | 在 MainActor context 消費 Repository 的 AsyncStream，直接 `send()` 給 Subject，無需 `receive(on:)` 或 `await MainActor.run` |
 | View（UIKit） | Combine `AnyPublisher` | `DiffableDataSource` 訂閱 `listPublisher` / `changesPublisher`，單向資料流，`cancellables` 自動管理生命週期 |
 
-`OddsStreamService` 以 `Task.sleep` loop 模擬持續推播，透過 `nonisolated let updates: AsyncStream<[Odds]>` 對外暴露串流。ViewModel 取得 `AsyncStream` 後以 `Task { for await odds in stream { ... } }` 消費，再寫入 `CurrentValueSubject` 驅動 UI。
+`OddsStreamService` 以 `Task.sleep` loop 模擬持續推播，透過 `nonisolated let updates: AsyncStream<[Odds]>` 對外暴露串流。Repository 內部以 `updatesConsumerTask` 消費，執行 `applyUpdates` 後轉發至自己的 AsyncStream；ViewModel 再以 `Task { for await (list, changes) in updatesStream { ... } }` 消費，寫入 Subject 驅動 UI。
 
 ---
 
@@ -56,13 +57,13 @@ UIKit 即時資料展示 App。採用 **MVVM** 架構，整合 REST API Mock、W
 
 **串流層 — `OddsStreamService` actor**：所有可變狀態（`lastKnownOdds`、`reconnectDelay`、`reconnectAttempts`、Task handles）均受 actor serial executor 保護。計時循環與斷線模擬統一使用 `Task` + `Task.sleep`，消除原先的 `DispatchWorkItem` / `DispatchQueue.main.asyncAfter` 混用。`nonisolated let updates: AsyncStream<[Odds]>` 讓外部無需 actor hop 即可取得串流；actor-isolated `Continuation` 的 `yield()` 只從 actor 方法呼叫，序列化由 actor 隱式保證，無需 `PassthroughSubject` 及其 `@MainActor` 依賴。
 
-**資料層 — `OddsRepository` actor**：`OddsRepository` 宣告為 `actor`，擁有自己的 background serial executor。所有資料處理（merge、sort、applyUpdates、cachedList 讀寫）都在此 executor 序列執行，透過 actor isolation 靜態保證不會有兩段程式碼同時讀寫同一份資料——無需手動加鎖，無 Race Condition。對外暴露 `activeStream: (any OddsStreamProtocol)?`，由 `@MainActor` ViewModel 自行 `await stream.updates` 取得 `AsyncStream`（在 MainActor context 存取，符合 SDK 的 `@MainActor` 推斷）。
+**資料層 — `OddsRepository` actor**：`OddsRepository` 宣告為 `actor`，擁有自己的 background serial executor。所有資料處理（merge、sort、applyUpdates、cachedList 讀寫）都在此 executor 序列執行，透過 actor isolation 靜態保證不會有兩段程式碼同時讀寫同一份資料——無需手動加鎖，無 Race Condition。Repository 內部以兩條 `Task + for await` loop 消費 `OddsStreamService` 的 `updates` / `disconnected` AsyncStream，將已處理的結果透過自己的 continuation 往外 yield，只對外暴露 `getUpdatesStream()` / `getDisconnectedStream()` 兩條 `AsyncStream<UpdateResult>` 與 `AsyncStream<Void>`；ViewModel 不認識 `OddsStreamProtocol`，也不直接存取底層 service。
 
-**UI 層 — `@MainActor OddsListViewModel`**：ViewModel 宣告 `@MainActor`，所有屬性（Subjects）與方法均保證在主線程執行。以 `Task { for await odds in oddsStream { ... } }` 消費 `AsyncStream`，Task 繼承 `@MainActor` context，`await repository.applyUpdates()` 後自動回到 MainActor，直接 `send()` 給 Subject——無需 `receive(on:)`、`Task { @MainActor in }`，或 `cancellables`。
+**UI 層 — `@MainActor OddsListViewModel`**：ViewModel 宣告 `@MainActor`，所有屬性（Subjects）與方法均保證在主線程執行。以 `Task { for await (list, changes) in updatesStream { ... } }` 消費 Repository 的 AsyncStream，Task 繼承 `@MainActor` context，收到結果後直接 `send()` 給 Subject——無需 `receive(on:)`、`await MainActor.run`，或 `cancellables`。`reconnectStream()` 依 Repository 回傳的 `Bool` 判斷是否需要呼叫 `resubscribeStreams()` 重新訂閱（背景回前景時 pipeline 已重建）。
 
 **單一資料源**：比賽列表由 `CurrentValueSubject<[MatchCellModel], Never>` 持有，外部只能訂閱，無法直接修改。
 
-**資料流**：`OddsStreamService.tick()` → `updatesContinuation.yield()`（actor）→ `for await odds in oddsStream`（@MainActor Task）→ `repository.applyUpdates()`（actor）→ Subject `send()`（MainActor）
+**資料流**：`OddsStreamService.tick()` → `updatesContinuation.yield()`（actor）→ Repository `updatesConsumerTask for await`（actor）→ `applyUpdates()`（actor）→ `yieldUpdate()`（actor）→ ViewModel `oddsTask for await`（@MainActor Task）→ Subject `send()`（MainActor）
 
 ---
 
@@ -90,9 +91,9 @@ UIKit 即時資料展示 App。採用 **MVVM** 架構，整合 REST API Mock、W
 
 ### WebSocket 斷線自動重連（Exponential Backoff）
 
-`OddsStreamService`（actor）模擬每 15 秒斷線一次，內部以 `Task.sleep` 計時（取代 DispatchWorkItem），斷線時透過 `disconnectedContinuation.yield(())` 發出事件。ViewModel 的 `Task { for await _ in disconnectedStream { ... } }` 收到事件後呼叫 `repository.reconnectStream()`，重連延遲從 1 秒開始每次加倍（1s → 2s → 4s → 8s → 16s → 上限 30s），設定最大重連次數（10 次）防止無限重試。連線成功後延遲與次數自動重置。
+`OddsStreamService`（actor）模擬每 15 秒斷線一次，內部以 `Task.sleep` 計時，斷線時透過 `disconnectedContinuation.yield(())` 發出事件。Repository 的 `disconnectedConsumerTask` 收到後轉發，ViewModel 的 `disconnectTask` 再呼叫 `reconnectStream()`。`reconnectStream()` 依 Repository 回傳值分兩路：若 streams 仍存活（WebSocket 自動斷線），只重啟底層 service（exponential backoff 1s → 2s → … → 上限 30s，最多 10 次）；若 pipeline 已重建（背景回前景），呼叫 `resubscribeStreams()` 重新訂閱。
 
-ViewController 另外監聽 `willResignActive` / `didBecomeActive`，App 進入背景時暫停串流，回前景時自動恢復，節省背景資源。
+ViewController 另外監聽 `willResignActive` / `didBecomeActive`，App 進入背景時暫停串流（`finishStreams` 取消 consumer Tasks 並 finish continuations），回前景時自動重建 pipeline 並重新訂閱，節省背景資源。
 
 ### 快取
 
@@ -105,7 +106,8 @@ SceneDelegate
         └── repository（OddsRepository）← actor
               ├── apiService           ← REST 呼叫封裝在此
               ├── oddsStreamFactory    ← async factory（await MainActor.run 建立 OddsStreamService）
-              ├── activeStream         ← 暴露 stream service，ViewModel 自行 await .updates / .disconnected
+              ├── getUpdatesStream()   ← 已合併處理的 AsyncStream<UpdateResult>（list + changes）
+              ├── getDisconnectedStream() ← 斷線事件 AsyncStream<Void>
               ├── startStream / pauseStream / reconnectStream ← async 生命週期方法
               └── cachedList           ← in-memory 快取
         makeOddsListViewModel() → OddsListViewModel(repository:)
@@ -113,7 +115,7 @@ SceneDelegate
               → 先 send repository.cachedList → 背景 REST 覆蓋 → 寫回 repository
 ```
 
-ViewModel 只依賴 `OddsRepository`，是所有資料的唯一窗口（REST + WebSocket + cache）。Repository 持有串流 service 但不消費，只暴露 `activeStream` 讓 `@MainActor` ViewModel 自行 `await stream.updates` 並以 `Task + for await` 消費。ViewModel 只管 Subject 寫入與 UI 驅動。VC 因 push/pop 被 dealloc、ViewModel 隨之釋放（`oddsTask` / `disconnectTask` 自動取消），`AppContainer` 持有的 `repository` 仍然存活，重建 ViewModel 時快取依然有效。
+ViewModel 只依賴 `OddsRepository`，是所有資料的唯一窗口（REST + WebSocket + cache）。Repository 內部持有並消費 stream service，以自己的 `updatesConsumerTask` / `disconnectedConsumerTask` 處理原始資料，對外只暴露已合併處理的 `getUpdatesStream()` / `getDisconnectedStream()`；ViewModel 不認識底層 service，只管以 `Task + for await` 消費 Repository 的 AsyncStream、寫入 Subject 驅動 UI。VC 因 push/pop 被 dealloc、ViewModel 隨之釋放（`oddsTask` / `disconnectTask` 自動取消），`AppContainer` 持有的 `repository` 仍然存活，重建 ViewModel 時快取依然有效。
 
 ---
 
@@ -137,7 +139,7 @@ OpenNet/
 │   ├── OddsListTableViewCell.swift  ← UI
 │   └── FPSMonitor.swift             ← CADisplayLink FPS 即時監測（Debug 用）
 ├── Repositories/
-│   └── OddsRepository.swift         ← actor；fetch + merge + sort + cache + applyUpdates + activeStream
+│   └── OddsRepository.swift         ← actor；fetch + merge + sort + cache + applyUpdates；內部消費 stream，對外暴露 getUpdatesStream / getDisconnectedStream
 └── Services/
     ├── MatchAPIServiceProtocol.swift ← REST 協定 + APIError（Sendable）；無 AnyObject constraint
     ├── MockAPIService.swift          ← struct；模擬 REST（100 筆），無狀態 value type
