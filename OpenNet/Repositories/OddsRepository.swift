@@ -85,13 +85,13 @@ actor OddsRepository {
         // Task handle 存起來，finishStreams 時取消，避免 zombie Task
         updatesConsumerTask = Task {
             for await odds in updates {
-                let result = await self.applyUpdates(odds)
-                await self.yieldUpdate(result)
+                let result = self.applyUpdates(odds)
+                self.yieldUpdate(result)
             }
         }
         disconnectedConsumerTask = Task {
             for await _ in disconnected {
-                await self.yieldDisconnected()
+                self.yieldDisconnected()
             }
         }
     }
