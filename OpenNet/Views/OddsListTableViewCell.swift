@@ -180,7 +180,7 @@ final class OddsListTableViewCell: UITableViewCell {
     ///  - item: 比賽 + 賠率資料
     ///  - highlightSide: 需要高亮的欄位方向，`nil` 表示不播放動畫。
 
-    func configure(with item: MatchCellModel, highlightSide: OddsHighlightSide? = nil) {
+    func configure(with item: MatchSummary, highlightSide: OddsHighlightSide? = nil) {
         matchTitleLabel.text = "\(item.teamA) vs \(item.teamB)"
         timeLabel.text = Self.formatTime(item.startTime)
 

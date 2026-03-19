@@ -48,7 +48,7 @@ final class OddsListViewModelTests: XCTestCase {
         stubAPI.oddsToReturn = TestFixtures.makeOdds(count: 5)
 
         let exp = expectation(description: "list published")
-        var receivedItems: [MatchCellModel] = []
+        var receivedItems: [MatchSummary] = []
 
         sut.listPublisher
             .dropFirst()
@@ -118,7 +118,7 @@ final class OddsListViewModelTests: XCTestCase {
 
         let loadExp = expectation(description: "initial load")
         let updateExp = expectation(description: "odds updated")
-        var emissions: [[MatchCellModel]] = []
+        var emissions: [[MatchSummary]] = []
 
         sut.listPublisher
             .dropFirst()

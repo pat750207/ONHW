@@ -1,5 +1,5 @@
 //
-//  MatchCellModel.swift
+//  MatchSummary.swift
 //  OpenNet
 //
 //  Created by Pat Chang on 2026/3/10.
@@ -8,7 +8,7 @@
 import Foundation
 
 
-struct MatchCellModel: Identifiable, Sendable {
+struct MatchSummary: Identifiable, Sendable {
 
   let matchID: Int
   let teamA: String
@@ -20,7 +20,7 @@ struct MatchCellModel: Identifiable, Sendable {
   var id: Int { matchID }
 
   /// 判斷同一場比賽的賠率是否有變動，用於決定是否需要 reconfigure cell。
-  static func oddsChanged(_ a: MatchCellModel, _ b: MatchCellModel) -> Bool {
+  static func oddsChanged(_ a: MatchSummary, _ b: MatchSummary) -> Bool {
     a.matchID == b.matchID
       && (a.teamAOdds != b.teamAOdds || a.teamBOdds != b.teamBOdds)
   }

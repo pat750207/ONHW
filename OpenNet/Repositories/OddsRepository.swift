@@ -36,10 +36,10 @@ actor OddsRepository {
     private var updatesConsumerTask: Task<Void, Never>?
     private var disconnectedConsumerTask: Task<Void, Never>?
 
-    private(set) var cachedList: [MatchCellModel] = []
+    private(set) var cachedList: [MatchSummary] = []
 
     // for highlight，對外 stream 與 applyUpdates 共用
-    typealias UpdateResult = (list: [MatchCellModel], changes: [Int: OddsHighlightSide])
+    typealias UpdateResult = (list: [MatchSummary], changes: [Int: OddsHighlightSide])
 
     private static let isoFormatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -144,7 +144,7 @@ actor OddsRepository {
     }
 
     // get matches + odds，合併、排序，更新快取後回傳結果。
-    func fetchSnapshot() async throws -> [MatchCellModel] {
+    func fetchSnapshot() async throws -> [MatchSummary] {
         async let matches = apiService.fetchMatches()
         async let odds = apiService.fetchOdds()
         let (m, o) = try await (matches, odds)
@@ -179,7 +179,7 @@ actor OddsRepository {
                 changes[existing.matchID] = .teamB
             }
 
-            list[idx] = MatchCellModel(
+            list[idx] = MatchSummary(
                 matchID: existing.matchID,
                 teamA: existing.teamA,
                 teamB: existing.teamB,
@@ -193,11 +193,11 @@ actor OddsRepository {
         return (list, changes)
     }
 
-    private func merge(matches: [Match], odds: [Odds]) -> [MatchCellModel] {
+    private func merge(matches: [Match], odds: [Odds]) -> [MatchSummary] {
         let oddsByMatch = Dictionary(uniqueKeysWithValues: odds.map { ($0.matchID, $0) })
         return matches.compactMap { m in
             guard let o = oddsByMatch[m.matchID] else { return nil }
-            return MatchCellModel(
+            return MatchSummary(
                 matchID: m.matchID,
                 teamA: m.teamA,
                 teamB: m.teamB,
@@ -208,7 +208,7 @@ actor OddsRepository {
         }
     }
 
-    private func sort(_ cells: [MatchCellModel]) -> [MatchCellModel] {
+    private func sort(_ cells: [MatchSummary]) -> [MatchSummary] {
         cells.sorted { $0.startTime < $1.startTime }
     }
 }

@@ -35,12 +35,12 @@ final class OddsListViewModel {
     private var disconnectTask: Task<Void, Never>?
 
     // 單一資料源：所有 UI 資料從這裡流出，不對外暴露可變狀態。
-    private let listSubject = CurrentValueSubject<[MatchCellModel], Never>([])
+    private let listSubject = CurrentValueSubject<[MatchSummary], Never>([])
     private let changesSubject = PassthroughSubject<[Int: OddsHighlightSide], Never>()
     private let errorSubject = PassthroughSubject<APIError, Never>()
 
     // @MainActor 保證 send 在主線程，.receive(on: DispatchQueue.main) 無必要。
-    var listPublisher: AnyPublisher<[MatchCellModel], Never> {
+    var listPublisher: AnyPublisher<[MatchSummary], Never> {
         listSubject.eraseToAnyPublisher()
     }
 

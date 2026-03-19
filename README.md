@@ -61,7 +61,7 @@ UIKit 即時資料展示 App。採用 **MVVM** 架構，整合 REST API Mock、W
 
 **UI 層 — `@MainActor OddsListViewModel`**：ViewModel 宣告 `@MainActor`，所有屬性（Subjects）與方法均保證在主線程執行。以 `Task { for await (list, changes) in updatesStream { ... } }` 消費 Repository 的 AsyncStream，Task 繼承 `@MainActor` context，收到結果後直接 `send()` 給 Subject——無需 `receive(on:)`、`await MainActor.run`，或 `cancellables`。`reconnectStream()` 依 Repository 回傳的 `Bool` 判斷是否需要呼叫 `resubscribeStreams()` 重新訂閱（背景回前景時 pipeline 已重建）。
 
-**單一資料源**：比賽列表由 `CurrentValueSubject<[MatchCellModel], Never>` 持有，外部只能訂閱，無法直接修改。
+**單一資料源**：比賽列表由 `CurrentValueSubject<[MatchSummary], Never>` 持有，外部只能訂閱，無法直接修改。
 
 **資料流**：`OddsStreamService.tick()` → `updatesContinuation.yield()`（actor）→ Repository `updatesConsumerTask for await`（actor）→ `applyUpdates()`（actor）→ `yieldUpdate()`（actor）→ ViewModel `oddsTask for await`（@MainActor Task）→ Subject `send()`（MainActor）
 
@@ -130,7 +130,7 @@ OpenNet/
 │   ├── Match.swift                  ← GET /matches 資料結構（Codable, Sendable）
 │   ├── Odds.swift                   ← GET /odds + WebSocket 共用（Codable, Sendable）
 │   ├── OddsHighlightSide.swift      ← 賠率變動方向（teamA / teamB / both, Sendable）
-│   └── MatchCellModel.swift         ← 顯示用 Model / DTO（Identifiable, Sendable）
+│   └── MatchSummary.swift         ← 顯示用 Model / DTO（Identifiable, Sendable）
 ├── ViewModels/
 │   └── OddsListViewModel.swift      ← @MainActor；Task+for-await 消費 AsyncStream、寫入 Subject、changesPublisher
 ├── ViewControllers/
@@ -149,7 +149,7 @@ OpenNetTests/
 ├── TestStubs.swift                  ← 共用 StubAPIService / StubStreamService / TestFixtures
 ├── OddsListViewModelTests.swift     ← 注入 stub 驗證 load / 串流更新 / changesPublisher / lifecycle
 ├── OddsRepositoryTests.swift        ← 直接測試 fetchSnapshot、applyUpdates highlight 判斷
-└── MatchCellModelTests.swift        ← oddsChanged diff helper、Identifiable
+└── MatchSummaryTests.swift        ← oddsChanged diff helper、Identifiable
 ```
 
 ---
@@ -162,6 +162,6 @@ OpenNetTests/
 
 - **OddsRepositoryTests**：直接對 `actor OddsRepository` 測試 `fetchSnapshot`（merge、sort、cache 寫入、API 失敗 throws、無賠率比賽略過）與 `applyUpdates`（teamA / teamB / both 變動、無變動、未知 matchID、空陣列）
 - **OddsListViewModelTests**：注入 `StubAPIService` + `StubStreamService`，驗證初始載入合併排序、串流推播僅更新對應 matchID、`changesPublisher` 推送正確 highlight side、`load()` 重複呼叫不重複啟動串流、pause/reconnect 正確委派至 Repository
-- **MatchCellModelTests**：`oddsChanged()` 各 branch（僅 A 變 / 僅 B 變 / 兩側都變 / 相同 / 不同 matchID）、`Identifiable` identity
+- **MatchSummaryTests**：`oddsChanged()` 各 branch（僅 A 變 / 僅 B 變 / 兩側都變 / 相同 / 不同 matchID）、`Identifiable` identity
 
 ---

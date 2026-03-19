@@ -24,7 +24,7 @@ final class OddsListViewController: UIViewController {
     private let viewModel: OddsListViewModel
     private var cancellables = Set<AnyCancellable>()
 
-    private var itemLookup: [Int: MatchCellModel] = [:]
+    private var itemLookup: [Int: MatchSummary] = [:]
 
     private var pendingChanges: [Int: OddsHighlightSide] = [:]
 
@@ -97,11 +97,11 @@ final class OddsListViewController: UIViewController {
             .store(in: &cancellables)
     }
 
-    // 1. 更新 itemLookup（matchID → MatchCellModel）
+    // 1. 更新 itemLookup（matchID → MatchSummary）
     // 2. 建立 snapshot（item = matchID 陣列）
     // 3. 若 pendingChanges 有值 → reconfigureItems
     // 4. apply snapshot → completion do highlight
-    private func applySnapshot(with items: [MatchCellModel]) {
+    private func applySnapshot(with items: [MatchSummary]) {
         // 1. 更新 lookup table
         itemLookup = Dictionary(items.map { ($0.matchID, $0) }, uniquingKeysWith: { _, new in new })
 
