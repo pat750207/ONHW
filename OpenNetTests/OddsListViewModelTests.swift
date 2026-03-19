@@ -9,6 +9,8 @@ import Combine
 import XCTest
 @testable import OpenNet
 
+/// ViewModel 為 @MainActor；測試類別需同隔離，否則 setUp / 訂閱 Publisher 會編譯失敗。
+@MainActor
 final class OddsListViewModelTests: XCTestCase {
 
     private var stubAPI: StubAPIService!

@@ -26,18 +26,23 @@ final class StubAPIService: MatchAPIServiceProtocol {
 
 // MARK: - Stream Stub
 
-// OddsStreamProtocol: Sendable，final class 無法自動合規，用 @unchecked 手動宣告。
-// 測試環境單線程使用，不存在真實 data race。
-//
-// Continuation 存為 private(set) var，測試透過 sendOddsUpdate / sendDisconnect
-// 方法模擬推播，比 PassthroughSubject 更貼近 AsyncStream 的實際使用方式。
+// OddsStreamProtocol：updates / disconnected 為 get async，生命週期方法為 async。
+// final class 搭配 @unchecked Sendable 僅供測試單線程使用。
 final class StubStreamService: OddsStreamProtocol, @unchecked Sendable {
+
+    private let updatesStream: AsyncStream<[Odds]>
+    private let disconnectedStream: AsyncStream<Void>
 
     private(set) var updatesContinuation: AsyncStream<[Odds]>.Continuation?
     private(set) var disconnectedContinuation: AsyncStream<Void>.Continuation?
 
-    let updates: AsyncStream<[Odds]>
-    let disconnected: AsyncStream<Void>
+    var updates: AsyncStream<[Odds]> {
+        get async { updatesStream }
+    }
+
+    var disconnected: AsyncStream<Void> {
+        get async { disconnectedStream }
+    }
 
     private(set) var isStarted = false
     private(set) var isPaused = false
@@ -46,16 +51,29 @@ final class StubStreamService: OddsStreamProtocol, @unchecked Sendable {
     init() {
         var updatesCont: AsyncStream<[Odds]>.Continuation!
         var disconnectedCont: AsyncStream<Void>.Continuation!
-        updates = AsyncStream { updatesCont = $0 }
-        disconnected = AsyncStream { disconnectedCont = $0 }
+        updatesStream = AsyncStream { updatesCont = $0 }
+        disconnectedStream = AsyncStream { disconnectedCont = $0 }
         updatesContinuation = updatesCont
         disconnectedContinuation = disconnectedCont
     }
 
-    func start() { isStarted = true }
-    func stop() { isStarted = false }
-    func pause() { isPaused = true; stop() }
-    func reconnect() { reconnectCount += 1; start() }
+    func start() async {
+        isStarted = true
+    }
+
+    func stop() async {
+        isStarted = false
+    }
+
+    func pause() async {
+        isPaused = true
+        await stop()
+    }
+
+    func reconnect() async {
+        reconnectCount += 1
+        await start()
+    }
 
     // MARK: - Test Helpers
 
